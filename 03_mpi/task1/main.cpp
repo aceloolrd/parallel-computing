@@ -22,7 +22,8 @@ const int password_length = 3;
 
 string generatePassword(int length);
 string digestToString(const md5::digest_type& digest);
-string bruteForce(int length, int start, int end, unsigned int digest);
+string bruteForce(int length, int start, int end, const md5::digest_type& target_digest);
+bool digestsEqual(const md5::digest_type& a, const md5::digest_type& b);
 
 int main(int argc, char** argv) {
 	srand(time(NULL));
@@ -44,18 +45,15 @@ int main(int argc, char** argv) {
 
 		md5 pass_hash;
 		md5::digest_type pass_digest;
-
-		pass_hash.process_bytes(random_password.data(), random_password.size());
-		pass_hash.get_digest(pass_digest);
 		pass_hash.process_bytes(random_password.data(), random_password.size());
 		pass_hash.get_digest(pass_digest);
 
 		cout << "Generated password: " << random_password << "\n";
+		cout << "MD5: " << digestToString(pass_digest) << "\n";
 
-		int iter_count, iter_piece, offset;
-		iter_count = pow(alphabet_length, password_length);
-		iter_piece = iter_count / slaves;
-		offset = 0;
+		int iter_count = (int)pow(alphabet_length, password_length);
+		int iter_piece = iter_count / slaves;
+		int offset = 0;
 
 		for (int dest = 1; dest <= slaves; dest++) {
 			if (dest == slaves) {
@@ -67,7 +65,7 @@ int main(int argc, char** argv) {
 
 			MPI_Send(&start, 1, MPI_INT, dest, TAG_START_DATA, MPI_COMM_WORLD);
 			MPI_Send(&end, 1, MPI_INT, dest, TAG_START_DATA, MPI_COMM_WORLD);
-			MPI_Send(&pass_digest, 1, MPI_UINT32_T, dest, TAG_START_DATA, MPI_COMM_WORLD);
+			MPI_Send(&pass_digest, 4, MPI_UINT32_T, dest, TAG_START_DATA, MPI_COMM_WORLD);
 
 			offset += iter_piece;
 		}
@@ -81,25 +79,23 @@ int main(int argc, char** argv) {
 				brut_password.push_back(0);
 			}
 			MPI_Recv(&brut_password[0], char_count, MPI_CHAR, src, TAG_RESULT_DATA, MPI_COMM_WORLD, &status);
-			cout << "Thread " << src << ", result " << brut_password << "\n";
-
+			cout << "Thread " << src << ", result: " << brut_password << "\n";
 		}
 	}
 
 	if (thread_id > 0) {
 		int start, end;
-		int source = 0;
-		unsigned int digest;
-		string result;
+		md5::digest_type target_digest;
 
-		MPI_Recv(&start, 1, MPI_INT, source, TAG_START_DATA, MPI_COMM_WORLD, &status);
-		MPI_Recv(&end, 1, MPI_INT, source, TAG_START_DATA, MPI_COMM_WORLD, &status);
-		MPI_Recv(&digest, 1, MPI_UINT32_T, source, TAG_START_DATA, MPI_COMM_WORLD, &status);
+		MPI_Recv(&start, 1, MPI_INT, 0, TAG_START_DATA, MPI_COMM_WORLD, &status);
+		MPI_Recv(&end, 1, MPI_INT, 0, TAG_START_DATA, MPI_COMM_WORLD, &status);
+		MPI_Recv(&target_digest, 4, MPI_UINT32_T, 0, TAG_START_DATA, MPI_COMM_WORLD, &status);
 
-		result = bruteForce(password_length, start, end, digest);
+		string result = bruteForce(password_length, start, end, target_digest);
 
-		MPI_Send(result.c_str(), result.size(), MPI_CHAR, source, TAG_RESULT_DATA, MPI_COMM_WORLD);
+		MPI_Send(result.c_str(), result.size(), MPI_CHAR, 0, TAG_RESULT_DATA, MPI_COMM_WORLD);
 	}
+
 	t_end = MPI_Wtime();
 
 	if (thread_id == 0) {
@@ -117,59 +113,53 @@ string generatePassword(int length) {
 		int ascii = 0;
 		switch (rand() % 3) {
 		case(0):
-			ascii = 48 + (rand() % 10); // 0-9
+			ascii = 48 + (rand() % 10);
 			break;
 		case(1):
-			ascii = 65 + (rand() % 26); // A-Z
+			ascii = 65 + (rand() % 26);
 			break;
 		case(2):
-			ascii = 97 + (rand() % 26); // a-z
+			ascii = 97 + (rand() % 26);
 			break;
 		}
-		char ch = char(ascii);
-		password += ch;
+		password += char(ascii);
 	}
 	return password;
 }
+
 string digestToString(const md5::digest_type& digest) {
 	const auto charDigest = reinterpret_cast<const char*>(&digest);
 	string result;
 	boost::algorithm::hex(charDigest, charDigest + sizeof(md5::digest_type), back_inserter(result));
 	return result;
 }
-string bruteForce(int length, int start, int end, unsigned int given_digest) {
-	string brut_password;
 
-	md5 brut_hash;
-	md5::digest_type brut_digest;
+bool digestsEqual(const md5::digest_type& a, const md5::digest_type& b) {
+	return memcmp(&a, &b, sizeof(md5::digest_type)) == 0;
+}
 
-	for (int i = 0; i < length; i++) {
-		brut_password.push_back('0');
-	}
+string bruteForce(int length, int start, int end, const md5::digest_type& target_digest) {
+	string brut_password(length, '0');
 
-	for (int i = start; i < end; i++) {
+	for (int i = start; i <= end; i++) {
 		int cur_iter = i;
 		for (int j = 0; j < length; j++) {
-			int divider = pow(alphabet_length, length - (j + 1));
+			int divider = (int)pow(alphabet_length, length - (j + 1));
 			int cur_pos = cur_iter / divider;
-			brut_password.at(j) = alphabet[cur_pos];
-			cur_iter = cur_iter - divider * cur_pos;
+			brut_password[j] = alphabet[cur_pos];
+			cur_iter -= divider * cur_pos;
 		}
-		brut_hash.process_bytes(brut_password.data(), brut_password.size());
-		brut_hash.get_digest(brut_digest);
+
+		md5 brut_hash;
+		md5::digest_type brut_digest;
 		brut_hash.process_bytes(brut_password.data(), brut_password.size());
 		brut_hash.get_digest(brut_digest);
 
-		if (*brut_digest == given_digest) {
-
-			cout << "\nPassword is found: " << brut_password << "\n\n";
+		if (digestsEqual(brut_digest, target_digest)) {
+			cout << "\nPassword found: " << brut_password << "\n\n";
 			return brut_password;
 		}
 	}
 
-	for (int i = 0; i < length; i++) {
-		brut_password.at(i) = '-';
-	}
-
-	return brut_password;
+	return string(length, '-');
 }
