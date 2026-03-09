@@ -38,27 +38,31 @@ cv::Mat performConvolution(const cv::Mat& input, const float* kernel, int kernel
 
     cv::Mat output(height, width, CV_8UC1);
 
-    // Выделение памяти на устройстве для входного и выходного изображения
+    // Выделение памяти на устройстве для входного, выходного изображения и ядра свёртки
     uchar* d_input, * d_output;
+    float* d_kernel;
     cudaMalloc(&d_input, width * height * sizeof(uchar));
     cudaMalloc(&d_output, width * height * sizeof(uchar));
+    cudaMalloc(&d_kernel, kernelSize * kernelSize * sizeof(float));
 
-    // Копирование входного изображения на устройство
+    // Копирование входного изображения и ядра свёртки на устройство
     cudaMemcpy(d_input, input.data, width * height * sizeof(uchar), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_kernel, kernel, kernelSize * kernelSize * sizeof(float), cudaMemcpyHostToDevice);
 
     // Вычисление размеров сетки и блока для запуска ядра CUDA
     dim3 blockSize(BLOCK_SIZE, BLOCK_SIZE);
     dim3 gridSize((width + blockSize.x - 1) / blockSize.x, (height + blockSize.y - 1) / blockSize.y);
 
     // Запуск ядра CUDA
-    convolutionKernel << <gridSize, blockSize >> > (d_input, d_output, width, height, kernel, kernelSize);
+    convolutionKernel << <gridSize, blockSize >> > (d_input, d_output, width, height, d_kernel, kernelSize);
 
-    // Копирование результата обратно на устройство
+    // Копирование результата обратно на хост
     cudaMemcpy(output.data, d_output, width * height * sizeof(uchar), cudaMemcpyDeviceToHost);
 
     // Освобождение памяти на устройстве
     cudaFree(d_input);
     cudaFree(d_output);
+    cudaFree(d_kernel);
 
     return output;
 }
